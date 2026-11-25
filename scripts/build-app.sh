@@ -26,5 +26,13 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
-codesign --force --sign - "$APP"
+# A stable identity keeps the macOS Accessibility grant across rebuilds; an
+# ad-hoc signature changes with every build and loses it.
+IDENTITY="ProjectWheel Local Signing"
+if security find-identity -p codesigning | grep -q "$IDENTITY"; then
+  codesign --force --sign "$IDENTITY" "$APP"
+else
+  echo "No \"$IDENTITY\" certificate in the keychain: ad-hoc signing (Accessibility must be re-granted after each build)"
+  codesign --force --sign - "$APP"
+fi
 echo "Built $APP"
