@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--dump") { dumpAndExit() }
+        if CommandLine.arguments.contains("--print-follow") { print(RemoteJournal.followCommand); exit(0) }
         // Followers of a previous instance that was killed outlive it: reap them,
         // and make sure ours die with us on a signal too.
         let reap = Process()

@@ -53,10 +53,17 @@ final class RemoteJournal {
     /// registry, one JSON object per line, closed by PW_REG_END.
     static let registrySnapshot =
         "for f in ~/.claude/sessions/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done; echo PW_REG_END"
+    /// A single foreground loop, deliberately without a background `tail -F`:
+    /// on Windows (Git Bash under OpenSSH) such a child outlives the connection.
+    /// The loop ends by itself when a write to the closed connection fails.
     static let followCommand =
-        "echo PW_CONNECTED; mkdir -p ~/.project-wheel; touch ~/.project-wheel/events.jsonl; "
-        + "tail -n 5000 -F ~/.project-wheel/events.jsonl & "
-        + "while :; do \(registrySnapshot) || exit; sleep 4; done"
+        "f=~/.project-wheel/events.jsonl; mkdir -p ~/.project-wheel; touch \"$f\"; echo PW_CONNECTED; "
+        + "off=$(( $(wc -c < \"$f\") )); head -c \"$off\" \"$f\" | tail -n 5000; i=0; "
+        + "while :; do s=$(( $(wc -c < \"$f\") )); "
+        + "if [ \"$s\" -lt \"$off\" ]; then off=0; fi; "
+        + "if [ \"$s\" -gt \"$off\" ]; then tail -c +$((off+1)) \"$f\" | head -c $((s-off)); off=$s; fi; "
+        + "if [ $((i % 4)) -eq 0 ]; then \(registrySnapshot) || exit; fi; "
+        + "i=$((i+1)); sleep 1; done"
 
     init(host: String, onLine: @escaping (String) -> Void, onState: @escaping (Bool) -> Void) {
         self.host = host
