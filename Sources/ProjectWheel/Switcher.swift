@@ -17,7 +17,10 @@ enum Switcher {
             // A free project is only its windows. With none attached there is
             // nothing to show, and focus mode would hide every app.
             guard WindowManager.shared.count(for: s.projectKey) > 0 else { NSSound.beep(); return }
-            queue.async { WindowManager.shared.focus(project: s.projectKey, keepApps: []) }
+            queue.async {
+                WindowManager.shared.focus(project: s.projectKey, keepApps: [])
+                WindowManager.shared.applyLayout(project: s.projectKey, session: nil)
+            }
             return
         }
         queue.async {
@@ -36,8 +39,61 @@ enum Switcher {
                     open(["claude://code/" + s.bridgeId])
                     open(["-a", "Claude"])
                 }
+                Thread.sleep(forTimeInterval: 0.4)  // let Claude come forward first
+            }
+            WindowManager.shared.applyLayout(project: s.projectKey, session: sessionWindow(s))
+        }
+    }
+
+    /// Records where the project's windows are now (menu action).
+    static func saveLayout(_ s: SessionInfo) {
+        queue.async {
+            WindowManager.shared.saveLayout(project: s.projectKey, session: s.isFree ? nil : sessionWindow(s))
+        }
+    }
+
+    /// The window that shows the session: Claude Desktop's main window for a
+    /// remote session, the Terminal window holding its tty for a local one.
+    private static func sessionWindow(_ s: SessionInfo) -> (pid_t, CGWindowID)? {
+        if s.isFree { return nil }
+        if !s.isLocal {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: claudeBundleID).first,
+                  let id = WindowManager.shared.mainWindowID(pid: app.processIdentifier) else { return nil }
+            return (app.processIdentifier, id)
+        }
+        guard let tty = sessionTTY(s),
+              let term = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").first
+        else { return nil }
+        var error: NSDictionary?
+        // Terminal's scripting window id is the window-server id.
+        let result = NSAppleScript(source: """
+        tell application "Terminal"
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if tty of t is "\(tty)" then return id of w
+                end repeat
+            end repeat
+            return 0
+        end tell
+        """)?.executeAndReturnError(&error)
+        guard let id = result?.int32Value, id > 0 else { return nil }
+        return (term.processIdentifier, CGWindowID(id))
+    }
+
+    /// The terminal device showing the session, without changing anything.
+    private static func sessionTTY(_ s: SessionInfo) -> String? {
+        if !s.tmuxPane.isEmpty, let tmux = tmuxPath {
+            let name = run(tmux, ["display-message", "-p", "-t", s.tmuxPane, "#{session_name}"])
+            if !name.isEmpty,
+               let tty = run(tmux, ["list-clients", "-t", name, "-F", "#{client_tty}"]).split(separator: "\n").first {
+                return String(tty)
             }
         }
+        if s.pid != 0 {
+            let t = run("/bin/ps", ["-o", "tty=", "-p", String(s.pid)])
+            if !t.isEmpty, t != "??" { return "/dev/" + t }
+        }
+        return nil
     }
 
     /// Apps focus mode must not hide: the one hosting the session. Terminal is

@@ -211,6 +211,127 @@ final class WindowManager: ObservableObject {
         }
     }
 
+    // MARK: Layouts (~/.project-wheel/layouts.json)
+
+    /// Position and size in global screen coordinates (origin top-left, as AX uses).
+    struct Frame: Codable { var x, y, w, h: Double }
+
+    /// project -> display configuration -> window key -> frame. The window key
+    /// is "session" for the session's own window, "pid:windowID" otherwise.
+    private var layouts: [String: [String: [String: Frame]]] = {
+        guard let data = try? Data(contentsOf: WindowManager.layoutsURL),
+              let l = try? JSONDecoder().decode([String: [String: [String: Frame]]].self, from: data) else { return [:] }
+        return l
+    }()
+    private let layoutLock = NSLock()
+    private static var layoutsURL: URL { AppConfig.dir.appendingPathComponent("layouts.json") }
+
+    /// Identifies the set of connected screens, so that a layout saved with the
+    /// external monitor is not applied on the laptop alone, and vice versa.
+    static func displayKey() -> String {
+        NSScreen.screens.map { s in
+            "\(Int(s.frame.width))x\(Int(s.frame.height))@\(Int(s.frame.minX)),\(Int(s.frame.minY))"
+        }.sorted().joined(separator: "|")
+    }
+
+    func hasLayout(project: String) -> Bool {
+        layoutLock.lock(); defer { layoutLock.unlock() }
+        return !(layouts[project]?[Self.displayKey()] ?? [:]).isEmpty
+    }
+
+    func forgetLayout(project: String) {
+        layoutLock.lock()
+        layouts[project]?[Self.displayKey()] = nil
+        let copy = layouts
+        layoutLock.unlock()
+        writeLayouts(copy)
+        wheelLog("layout forgotten for \(project)")
+    }
+
+    private func writeLayouts(_ l: [String: [String: [String: Frame]]]) {
+        if let data = try? JSONEncoder().encode(l) { try? data.write(to: Self.layoutsURL, options: .atomic) }
+        DispatchQueue.main.async { self.objectWillChange.send() }
+    }
+
+    /// The project's windows as (key, pid, id): the session window, then the attached ones.
+    private func layoutTargets(project: String, session: (pid_t, CGWindowID)?) -> [(String, pid_t, CGWindowID)] {
+        var attached: [AttachedWindow] = []
+        let read = { attached = self.windows.filter { $0.project == project } }
+        if Thread.isMainThread { read() } else { DispatchQueue.main.sync(execute: read) }
+        var targets = attached.map { ("\($0.pid):\($0.windowID)", $0.pid, $0.windowID) }
+        if let session { targets.insert(("session", session.0, session.1), at: 0) }
+        return targets
+    }
+
+    private func axWindow(pid: pid_t, id: CGWindowID) -> AXUIElement? {
+        let axApp = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(axApp, 1)
+        let wins: [AXUIElement] = Self.attribute(axApp, kAXWindowsAttribute) ?? []
+        return wins.first { win in
+            var wid: CGWindowID = 0
+            return _AXUIElementGetWindow(win, &wid) == .success && wid == id
+        }
+    }
+
+    /// Off the main thread. Records where the project's windows are now, for the
+    /// current screens. Windows on another Space are invisible to AX and skipped.
+    @discardableResult
+    func saveLayout(project: String, session: (pid_t, CGWindowID)?) -> Int {
+        guard AXIsProcessTrusted() else { return 0 }
+        var frames: [String: Frame] = [:]
+        for (key, pid, id) in layoutTargets(project: project, session: session) {
+            guard let win = axWindow(pid: pid, id: id) else { wheelLog("layout save: #\(id) not visible, skipped"); continue }
+            var p: CFTypeRef?, s: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(win, kAXPositionAttribute as CFString, &p) == .success,
+                  AXUIElementCopyAttributeValue(win, kAXSizeAttribute as CFString, &s) == .success,
+                  let p, let s, CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { continue }
+            var point = CGPoint.zero, size = CGSize.zero
+            AXValueGetValue(p as! AXValue, .cgPoint, &point)
+            AXValueGetValue(s as! AXValue, .cgSize, &size)
+            frames[key] = Frame(x: point.x, y: point.y, w: size.width, h: size.height)
+        }
+        layoutLock.lock()
+        layouts[project, default: [:]][Self.displayKey()] = frames
+        let copy = layouts
+        layoutLock.unlock()
+        writeLayouts(copy)
+        wheelLog("layout saved for \(project) on \(Self.displayKey()): \(frames.count) windows")
+        return frames.count
+    }
+
+    /// Off the main thread. Puts the project's windows back where they were saved
+    /// for the current screens, if a layout exists.
+    func applyLayout(project: String, session: (pid_t, CGWindowID)?) {
+        guard AXIsProcessTrusted() else { return }
+        layoutLock.lock()
+        let frames = layouts[project]?[Self.displayKey()] ?? [:]
+        layoutLock.unlock()
+        guard !frames.isEmpty else { return }
+        var moved = 0
+        for (key, pid, id) in layoutTargets(project: project, session: session) {
+            guard let f = frames[key], let win = axWindow(pid: pid, id: id) else { continue }
+            var point = CGPoint(x: f.x, y: f.y), size = CGSize(width: f.w, height: f.h)
+            guard let pv = AXValueCreate(.cgPoint, &point), let sv = AXValueCreate(.cgSize, &size) else { continue }
+            // Size, position, size: a move across screens can clamp the first resize.
+            AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, sv)
+            AXUIElementSetAttributeValue(win, kAXPositionAttribute as CFString, pv)
+            AXUIElementSetAttributeValue(win, kAXSizeAttribute as CFString, sv)
+            moved += 1
+        }
+        wheelLog("layout applied for \(project): \(moved)/\(frames.count) windows")
+    }
+
+    /// The window an app currently treats as its main one.
+    func mainWindowID(pid: pid_t) -> CGWindowID? {
+        let axApp = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(axApp, 1)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axApp, kAXMainWindowAttribute as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
+        var id: CGWindowID = 0
+        return _AXUIElementGetWindow(ref as! AXUIElement, &id) == .success && id != 0 ? id : nil
+    }
+
     /// Window id -> owner pid for every window, including minimized, hidden and
     /// other-Space ones (.optionAll). Needs no permission for ids and pids.
     /// Nil when the list is unavailable or empty.

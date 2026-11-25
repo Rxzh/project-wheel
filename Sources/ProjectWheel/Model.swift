@@ -6,9 +6,10 @@ enum SessionStatus: Int {
     case waiting = 1          // turn finished, your move
     case failed = 2           // turn ended on an API error
     case running = 3          // working on its own
-    case free = 4             // free project: windows only, no session behind it
+    case background = 4       // turn ended, but its background tasks (workflow, shells) still run
+    case free = 5             // free project: windows only, no session behind it
 
-    var needsYou: Bool { self != .running && self != .free }
+    var needsYou: Bool { self != .running && self != .background && self != .free }
 
     var label: String {
         switch self {
@@ -16,6 +17,7 @@ enum SessionStatus: Int {
         case .waiting: return "À toi"
         case .failed: return "Erreur"
         case .running: return "Tourne"
+        case .background: return "Tourne en fond"
         case .free: return "Projet libre"
         }
     }
@@ -26,6 +28,7 @@ enum SessionStatus: Int {
         case .waiting: return .orange
         case .failed: return .purple
         case .running: return .green
+        case .background: return .mint
         case .free: return .gray
         }
     }
@@ -81,7 +84,7 @@ struct SessionInfo: Identifiable {
             return lastPrompt.isEmpty ? lastMessage : "› " + lastPrompt
         default:
             let text = lastMessage.isEmpty ? (lastPrompt.isEmpty ? "" : "› " + lastPrompt) : lastMessage
-            return backgroundTasks > 0 ? "⏳ tâches de fond en cours · " + text : text
+            return status == .background ? "⏳ tâches de fond en cours · " + text : text
         }
     }
 }
@@ -232,8 +235,10 @@ final class Store: ObservableObject {
             }
         case "Stop":
             if let m = payload["last_assistant_message"] as? String { s.lastMessage = Self.oneLine(m) }
+            // With background tasks still running, Claude is not waiting for you:
+            // it will be woken up when they finish.
             s.backgroundTasks = (payload["bg"] as? Int) ?? 0
-            set(.waiting)
+            set(s.backgroundTasks > 0 ? .background : .waiting)
         case "StopFailure":
             set(.failed)
         default:
@@ -277,13 +282,20 @@ final class Store: ObservableObject {
             if let t = o["tmux"] as? String, let pane = t.split(separator: ".").last { s.tmuxPane = String(pane) }
             if s.title.isEmpty { s.title = (o["name"] as? String) ?? "" }
             s.bridgeId = (o["bridgeSessionId"] as? String) ?? ""
-            // Registry status: "busy", "idle", or "waiting" (blocked on a permission).
-            let reg = o["status"] as? String
-            let regStatus: SessionStatus = reg == "busy" ? .running : (reg == "waiting" ? .needsPermission : .waiting)
+            // Registry status: "busy", "idle", "waiting" (blocked on a permission),
+            // or "shell" (turn ended, background tasks still running).
+            let regStatus: SessionStatus
+            switch o["status"] as? String {
+            case "busy": regStatus = .running
+            case "shell": regStatus = .background
+            case "waiting": regStatus = .needsPermission
+            default: regStatus = .waiting
+            }
             let since = Date(timeIntervalSince1970: ((o["statusUpdatedAt"] as? Double) ?? 0) / 1000)
             if !s.hasHookEvents {
                 if s.status != regStatus || s.statusSince != since { s.status = regStatus; s.statusSince = since }
-            } else if since.timeIntervalSince(s.lastEventAt) > 1.5, (regStatus == .running) != (s.status == .running) {
+            } else if since.timeIntervalSince(s.lastEventAt) > 1.5, regStatus != s.status,
+                      !(s.status == .failed && regStatus == .waiting) {
                 // The registry moved after the last hook event. Hooks miss some
                 // transitions: Escape fires no Stop, and nothing fires between an
                 // approval and the end of a long tool call.

@@ -240,6 +240,15 @@ struct SessionRow: View {
             if !session.isFree && !session.customName.isEmpty {
                 Button("Rétablir le nom du dossier") { store.rename(session, to: "") }
             }
+            if WindowManager.shared.trusted {
+                let has = WindowManager.shared.hasLayout(project: session.projectKey)
+                Button(has ? "Mettre à jour la disposition des fenêtres" : "Enregistrer la disposition des fenêtres") {
+                    Switcher.saveLayout(session)
+                }
+                if has {
+                    Button("Oublier la disposition") { WindowManager.shared.forgetLayout(project: session.projectKey) }
+                }
+            }
             if attached > 0 {
                 Button(attached == 1 ? "Détacher sa fenêtre" : "Détacher ses \(attached) fenêtres") {
                     WindowManager.shared.detachAll(project: session.projectKey)

@@ -38,6 +38,14 @@ local or on remote machines, and which ones are waiting for you.
   (pencil on hover, or right-click); free projects can be deleted, which detaches
   their windows. Stored in `~/.project-wheel/projects.json`.
 
+- **Layouts.** Right-click a project, "Enregistrer la disposition des fenêtres":
+  the position and size of its session window and attached windows are stored
+  per display configuration (`~/.project-wheel/layouts.json`) and restored on
+  each switch.
+- **Background work.** A session whose turn ended while background tasks are
+  still running shows "Tourne en fond", not "À toi".
+- **Diagnostics.** `~/.project-wheel/app.log` records attachments, raises and layouts.
+
 ## Setup
 
 ```sh
@@ -55,4 +63,4 @@ Builds with the Command Line Tools alone (no Xcode). Debug the derived state wit
 2. ~~Menu-bar list with status~~
 3. ~~Radial wheel on ⌃⌥Space (hold, aim, release; quick tap keeps it open), reminder card in the centre~~
 4. ~~Focus mode: windows attached by hand (⌃⌥A), raised on a switch, the rest hidden~~
-5. Saved window layouts per display configuration
+5. ~~Saved window layouts per display configuration~~
