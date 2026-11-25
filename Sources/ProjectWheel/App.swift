@@ -6,12 +6,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var local: LocalJournal!
     private var remotes: [RemoteJournal] = []
     private var timer: Timer?
+    private var wheel: WheelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--dump") { dumpAndExit() }
         local = LocalJournal { [store] line in store.apply(line: line, isLocal: true) }
         tick()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
+
+        wheel = WheelController(store: store)
+        if ProcessInfo.processInfo.environment["PW_SHOW_WHEEL"] != nil {  // debug aid
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.wheel?.show(sticky: true) }
+        }
 
         for host in AppConfig.load().remotes {
             store.remoteConnected[host] = false

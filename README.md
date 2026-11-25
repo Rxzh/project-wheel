@@ -31,6 +31,6 @@ Builds with the Command Line Tools alone (no Xcode). Debug the derived state wit
 
 1. ~~Hooks and journal, local and remote~~
 2. ~~Menu-bar list with status~~
-3. Radial wheel on a global hotkey, with a reminder card per project
+3. ~~Radial wheel on ⌃⌥Space (hold, aim, release; quick tap keeps it open), reminder card in the centre~~
 4. Focus mode: raise all of a project's windows, hide the rest
 5. Saved window layouts per display configuration
