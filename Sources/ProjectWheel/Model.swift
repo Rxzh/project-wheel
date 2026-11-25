@@ -37,9 +37,11 @@ struct SessionInfo: Identifiable {
     var statusSince: Date = Date()
     var lastEventAt: Date = .distantPast
     var hasHookEvents = false
+    var sawPermissionRequest = false
     var lastPrompt: String = ""
     var lastMessage: String = ""
     var permissionTool: String = ""
+    var backgroundTasks = 0     // still running when the last turn ended
     var tmuxPane: String = ""   // e.g. "%0"
     var pid: Int32 = 0          // local sessions only (from the registry)
     var title: String = ""
@@ -64,7 +66,8 @@ struct SessionInfo: Identifiable {
         case .running:
             return lastPrompt.isEmpty ? lastMessage : "› " + lastPrompt
         default:
-            return lastMessage.isEmpty ? (lastPrompt.isEmpty ? "" : "› " + lastPrompt) : lastMessage
+            let text = lastMessage.isEmpty ? (lastPrompt.isEmpty ? "" : "› " + lastPrompt) : lastMessage
+            return backgroundTasks > 0 ? "⏳ tâches de fond en cours · " + text : text
         }
     }
 }
@@ -126,23 +129,29 @@ final class Store: ObservableObject {
         }
         switch event {
         case "SessionStart":
-            set(.waiting)
+            // A compaction restarts the session mid-turn: it is still working.
+            if (payload["source"] as? String) != "compact" { set(.waiting) }
         case "UserPromptSubmit":
             if let p = payload["prompt"] as? String { s.lastPrompt = Self.oneLine(p) }
+            s.backgroundTasks = 0
             set(.running)
         case "PostToolUse":
             set(.running)
         case "PermissionRequest":
             s.permissionTool = (payload["tool_name"] as? String) ?? ""
+            s.sawPermissionRequest = true
             set(.needsPermission)
         case "Notification":
             switch payload["notification_type"] as? String {
-            case "permission_prompt": set(.needsPermission)
+            // Arrives seconds after PermissionRequest, possibly after the approval:
+            // only trust it on versions that never send PermissionRequest.
+            case "permission_prompt": if !s.sawPermissionRequest { set(.needsPermission) }
             case "idle_prompt", "agent_needs_input", "elicitation_dialog": if s.status == .running { set(.waiting) }
             default: break
             }
         case "Stop":
             if let m = payload["last_assistant_message"] as? String { s.lastMessage = Self.oneLine(m) }
+            s.backgroundTasks = (payload["bg"] as? Int) ?? 0
             set(.waiting)
         case "StopFailure":
             set(.failed)
@@ -170,13 +179,22 @@ final class Store: ObservableObject {
             alive.insert(sid)
             var s = sessions[sid] ?? SessionInfo(id: sid, host: Host.current().localizedName ?? "local", isLocal: true)
             s.pid = Int32(pid)
-            if s.cwd.isEmpty { s.cwd = (o["cwd"] as? String) ?? "" }
+            // The launch directory identifies the project; hook cwd can drift with `cd`.
+            if let cwd = o["cwd"] as? String, !cwd.isEmpty { s.cwd = cwd }
             if let t = o["tmux"] as? String, let pane = t.split(separator: ".").last { s.tmuxPane = String(pane) }
             if s.title.isEmpty { s.title = (o["name"] as? String) ?? "" }
+            // Registry status: "busy", "idle", or "waiting" (blocked on a permission).
+            let reg = o["status"] as? String
+            let regStatus: SessionStatus = reg == "busy" ? .running : (reg == "waiting" ? .needsPermission : .waiting)
+            let since = Date(timeIntervalSince1970: ((o["statusUpdatedAt"] as? Double) ?? 0) / 1000)
             if !s.hasHookEvents {
-                let st: SessionStatus = (o["status"] as? String) == "busy" ? .running : .waiting
-                let since = Date(timeIntervalSince1970: ((o["statusUpdatedAt"] as? Double) ?? 0) / 1000)
-                if s.status != st || s.statusSince != since { s.status = st; s.statusSince = since }
+                if s.status != regStatus || s.statusSince != since { s.status = regStatus; s.statusSince = since }
+            } else if since.timeIntervalSince(s.lastEventAt) > 1.5, (regStatus == .running) != (s.status == .running) {
+                // The registry moved after the last hook event. Hooks miss some
+                // transitions: Escape fires no Stop, and nothing fires between an
+                // approval and the end of a long tool call.
+                s.status = regStatus
+                s.statusSince = since
             }
             sessions[sid] = s
         }

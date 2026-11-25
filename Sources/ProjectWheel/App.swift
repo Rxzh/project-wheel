@@ -38,6 +38,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let j = LocalJournal { [store] line in store.apply(line: line, isLocal: true) }
         j.poll()
         store.refreshRegistry()
+        for host in AppConfig.load().remotes {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            p.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "tail -n 5000 ~/.project-wheel/events.jsonl"]
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { print("remote \(host): ssh failed"); continue }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            var buf = LineBuffer()
+            let lines = buf.feed(data)
+            print("remote \(host): exit \(p.terminationStatus), \(lines.count) events")
+            for line in lines { store.apply(line: line, isLocal: false) }
+        }
         for s in store.sorted {
             print("\(s.status.label)\t\(s.projectName)\t\(s.host)\tpane=\(s.tmuxPane)\tpid=\(s.pid)\t\(s.reminder.prefix(80))")
         }

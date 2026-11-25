@@ -63,7 +63,7 @@ final class RemoteJournal {
             "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=2",
             host,
             // The echo proves the link is up even when the journal is empty.
-            "echo PW_CONNECTED; mkdir -p ~/.project-wheel; touch ~/.project-wheel/events.jsonl; tail -n 500 -F ~/.project-wheel/events.jsonl",
+            "echo PW_CONNECTED; mkdir -p ~/.project-wheel; touch ~/.project-wheel/events.jsonl; tail -n 5000 -F ~/.project-wheel/events.jsonl",
         ]
         let out = Pipe()
         p.standardOutput = out
