@@ -110,6 +110,10 @@ final class WindowManager: ObservableObject {
         save(windows.filter { !($0.pid == w.pid && $0.windowID == w.windowID) })
     }
 
+    func detachAll(project: String) {
+        save(windows.filter { $0.project != project })
+    }
+
     private func save(_ list: [AttachedWindow]) {
         windows = list
         try? FileManager.default.createDirectory(at: AppConfig.dir, withIntermediateDirectories: true)

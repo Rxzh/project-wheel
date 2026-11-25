@@ -6,8 +6,9 @@ enum SessionStatus: Int {
     case waiting = 1          // turn finished, your move
     case failed = 2           // turn ended on an API error
     case running = 3          // working on its own
+    case free = 4             // free project: windows only, no session behind it
 
-    var needsYou: Bool { self != .running }
+    var needsYou: Bool { self != .running && self != .free }
 
     var label: String {
         switch self {
@@ -15,6 +16,7 @@ enum SessionStatus: Int {
         case .waiting: return "À toi"
         case .failed: return "Erreur"
         case .running: return "Tourne"
+        case .free: return "Projet libre"
         }
     }
 
@@ -24,6 +26,7 @@ enum SessionStatus: Int {
         case .waiting: return .orange
         case .failed: return .purple
         case .running: return .green
+        case .free: return .gray
         }
     }
 }
@@ -48,8 +51,11 @@ struct SessionInfo: Identifiable {
     var registryHost = ""
     var bridgeId = ""           // remote-control session id ("session_…"), if any
     var title: String = ""
+    var isFree = false          // created by hand in the menu; id is "free:<uuid>"
+    var customName = ""         // user-chosen display name, if any
 
     var projectName: String {
+        if !customName.isEmpty { return customName }
         // Windows hosts report paths with backslashes.
         let name = cwd.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
         return name.isEmpty ? "?" : name
@@ -57,12 +63,12 @@ struct SessionInfo: Identifiable {
 
     /// What attached windows hang on. Not keyed on the host name: hook events
     /// and the registry spell the same host differently.
-    var projectKey: String { (isLocal ? "local:" : "remote:") + cwd }
+    var projectKey: String { isFree ? id : (isLocal ? "local:" : "remote:") + cwd }
 
     /// Stable per-project hue so a project always has the same colour.
     var projectColor: Color {
         var h: UInt32 = 2166136261
-        for b in (host + cwd).utf8 { h = (h ^ UInt32(b)) &* 16777619 }
+        for b in (isFree ? id : host + cwd).utf8 { h = (h ^ UInt32(b)) &* 16777619 }
         return Color(hue: Double(h % 360) / 360.0, saturation: 0.55, brightness: 0.85)
     }
 
@@ -100,11 +106,78 @@ final class Store: ObservableObject {
     /// Sessions with no registry entry (remote, Desktop…) are dropped after this much silence.
     private let staleAfter: TimeInterval = 12 * 3600
 
+    /// Everything the list and the wheel show: sessions first (those that need
+    /// you on top), then free projects, with user-chosen names applied.
     var sorted: [SessionInfo] {
-        sessions.values.sorted {
+        let live = sessions.values.sorted {
             if $0.status != $1.status { return $0.status.rawValue < $1.status.rawValue }
             return $0.statusSince > $1.statusSince
+        }.map { s -> SessionInfo in
+            var s = s
+            s.customName = names[s.projectKey] ?? ""
+            return s
         }
+        let free = freeProjects.map { p -> SessionInfo in
+            var s = SessionInfo(id: p.id, host: "", isLocal: true)
+            s.isFree = true
+            s.customName = p.name
+            s.status = .free
+            s.statusSince = .distantPast
+            return s
+        }
+        return live + free
+    }
+
+    // MARK: Free projects and custom names (~/.project-wheel/projects.json)
+
+    struct FreeProject: Codable { var id: String; var name: String }
+    private struct ProjectsFile: Codable { var free: [FreeProject] = []; var names: [String: String] = [:] }
+
+    @Published private(set) var freeProjects: [FreeProject] = []
+    @Published private(set) var names: [String: String] = [:]  // projectKey -> display name
+    private static var projectsURL: URL { AppConfig.dir.appendingPathComponent("projects.json") }
+
+    init() {
+        if let data = try? Data(contentsOf: Self.projectsURL),
+           let f = try? JSONDecoder().decode(ProjectsFile.self, from: data) {
+            freeProjects = f.free
+            names = f.names
+        }
+    }
+
+    private func saveProjects() {
+        try? FileManager.default.createDirectory(at: AppConfig.dir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(ProjectsFile(free: freeProjects, names: names)) {
+            try? data.write(to: Self.projectsURL, options: .atomic)
+        }
+    }
+
+    func addFreeProject(name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        freeProjects.append(FreeProject(id: "free:" + UUID().uuidString, name: name))
+        saveProjects()
+    }
+
+    /// Free projects stay separate from session projects even when a session
+    /// later starts under the same name. An empty name restores a session
+    /// project's folder name and leaves a free project unchanged.
+    func rename(_ s: SessionInfo, to newName: String) {
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isFree {
+            guard !name.isEmpty, let i = freeProjects.firstIndex(where: { $0.id == s.id }) else { return }
+            freeProjects[i].name = name
+        } else {
+            names[s.projectKey] = name.isEmpty ? nil : name
+        }
+        saveProjects()
+    }
+
+    /// Its windows are detached, not closed.
+    func deleteFreeProject(_ s: SessionInfo) {
+        freeProjects.removeAll { $0.id == s.id }
+        saveProjects()
+        WindowManager.shared.detachAll(project: s.projectKey)
     }
 
     var needsYouCount: Int { sessions.values.filter { $0.status.needsYou }.count }

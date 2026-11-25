@@ -13,6 +13,13 @@ enum Switcher {
     private static let queue = DispatchQueue(label: "ProjectWheel.switch", qos: .userInitiated)
 
     static func focus(_ s: SessionInfo) {
+        if s.isFree {
+            // A free project is only its windows. With none attached there is
+            // nothing to show, and focus mode would hide every app.
+            guard WindowManager.shared.count(for: s.projectKey) > 0 else { NSSound.beep(); return }
+            queue.async { WindowManager.shared.focus(project: s.projectKey, keepApps: []) }
+            return
+        }
         queue.async {
             // Hide the rest and raise the project's windows first, so the
             // session's own window, brought forward below, ends on top.

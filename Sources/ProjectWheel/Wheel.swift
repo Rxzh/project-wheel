@@ -107,7 +107,7 @@ final class WheelController {
         if panel != nil { hide(); return }
         // Capture first: whatever is frontmost now is the window the user means.
         guard WindowManager.shared.ensureTrusted() else { return }  // the system dialog explains
-        guard !store.sessions.isEmpty, let w = WindowManager.shared.frontmostWindow() else { NSSound.beep(); return }
+        guard !store.sorted.isEmpty, let w = WindowManager.shared.frontmostWindow() else { NSSound.beep(); return }
         show(sticky: false, attaching: w)
     }
 
@@ -194,7 +194,7 @@ struct WheelView: View {
             ZStack {
                 if n == 0 {
                     Circle().fill(.ultraThinMaterial).frame(width: 2 * WheelController.innerRadius, height: 2 * WheelController.innerRadius)
-                    Text("Aucune session active").foregroundStyle(.secondary)
+                    Text("Aucun projet actif").foregroundStyle(.secondary)
                 }
                 ForEach(Array(state.sessions.enumerated()), id: \.element.id) { i, s in
                     SectorView(session: s, index: i, count: n, selected: state.selected == i)
@@ -288,7 +288,8 @@ struct ReminderCard: View {
             Text(session.projectName).font(.system(size: 17, weight: .bold)).lineLimit(1)
             HStack(spacing: 5) {
                 Circle().fill(session.status.color).frame(width: 8, height: 8)
-                Text("\(session.status.label) · \(SessionRow.elapsed(since: session.statusSince, now: Date()))")
+                Text(session.isFree ? session.status.label
+                     : "\(session.status.label) · \(SessionRow.elapsed(since: session.statusSince, now: Date()))")
                     .font(.system(size: 12))
             }
             if !session.isLocal {

@@ -33,6 +33,11 @@ local or on remote machines, and which ones are waiting for you.
   without it switching works as before. The build is ad-hoc signed, so a rebuild
   may require granting the permission again.
 
+- **Free projects and names.** "Nouveau projet" in the menu creates a project
+  with no session behind it: only attached windows. Any project can be renamed
+  (pencil on hover, or right-click); free projects can be deleted, which detaches
+  their windows. Stored in `~/.project-wheel/projects.json`.
+
 ## Setup
 
 ```sh

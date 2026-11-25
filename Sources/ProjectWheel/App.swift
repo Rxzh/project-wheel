@@ -80,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             for line in lines { store.applyRemote(line: line, host: host) }
         }
         for s in store.sorted {
-            print("\(s.status.label)\t\(s.projectName)\t\(s.isLocal ? "local" : s.host)\tpane=\(s.tmuxPane)\tbridge=\(s.bridgeId.prefix(14))\t\(s.reminder.prefix(70))")
+            print("\(s.status.label)\t\(s.projectName)\t\(s.isFree ? "libre" : (s.isLocal ? "local" : s.host))\tpane=\(s.tmuxPane)\tbridge=\(s.bridgeId.prefix(14))\t\(s.reminder.prefix(70))")
         }
         let wm = WindowManager.shared
         print("accessibility=\(wm.trusted) focusMode=\(wm.focusMode) attached=\(wm.windows.count)")
@@ -118,6 +118,13 @@ struct MenuBarLabel: View {
 struct SessionList: View {
     @ObservedObject var store: Store
     @ObservedObject var windows = WindowManager.shared
+    @StateObject private var edit = EditState()
+
+    private func addProject() {
+        store.addFreeProject(name: edit.newName)
+        edit.newName = ""
+        edit.adding = false
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -146,9 +153,28 @@ struct SessionList: View {
                     .padding(16)
             }
             ForEach(store.sorted) { s in
-                SessionRow(session: s)
+                SessionRow(session: s, store: store, attached: windows.count(for: s.projectKey), edit: edit)
                 Divider()
             }
+            // A free project groups windows only (pages, tools), with no session.
+            HStack(spacing: 8) {
+                if edit.adding {
+                    TextField("Nom du nouveau projet", text: $edit.newName)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { addProject() }
+                    Button("Créer") { addProject() }
+                    Button("Annuler") { edit.adding = false; edit.newName = "" }
+                } else {
+                    Button { edit.adding = true } label: { Label("Nouveau projet", systemImage: "plus.circle") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+            }
+            .font(.callout)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            Divider()
             HStack(spacing: 10) {
                 ForEach(store.remoteConnected.keys.sorted(), id: \.self) { host in
                     let up = store.remoteConnected[host] ?? false
@@ -179,22 +205,70 @@ final class HoverState: ObservableObject {
     @Published var on = false
 }
 
+/// Which row is being renamed, and the "new project" field. Shared by the list.
+final class EditState: ObservableObject {
+    @Published var editingKey: String?
+    @Published var text = ""
+    @Published var adding = false
+    @Published var newName = ""
+}
+
 struct SessionRow: View {
     let session: SessionInfo
+    let store: Store
+    let attached: Int
+    @ObservedObject var edit: EditState
     // @State is a macro in the macOS 27 SDK and its plugin ships only with Xcode;
     // a StateObject keeps the project buildable with the Command Line Tools alone.
     @StateObject private var hover = HoverState()
 
+    private var editing: Bool { edit.editingKey == session.projectKey }
+
     var body: some View {
-        Button {
-            Switcher.focus(session)
-        } label: {
-            HStack(alignment: .top, spacing: 10) {
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(session.projectColor)
-                    .frame(width: 6)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
+        Group {
+            if editing {
+                content  // not a button while the name field is open
+            } else {
+                Button { Switcher.focus(session) } label: { content }
+                    .buttonStyle(.plain)
+            }
+        }
+        .onHover { hover.on = $0 }
+        .contextMenu {
+            Button("Renommer…") { startRename() }
+            if !session.isFree && !session.customName.isEmpty {
+                Button("Rétablir le nom du dossier") { store.rename(session, to: "") }
+            }
+            if session.isFree {
+                Button("Supprimer le projet") { store.deleteFreeProject(session) }
+            }
+        }
+    }
+
+    private func startRename() {
+        edit.text = session.projectName
+        edit.editingKey = session.projectKey
+    }
+
+    private func commitRename() {
+        store.rename(session, to: edit.text)
+        edit.editingKey = nil
+    }
+
+    private var content: some View {
+        HStack(alignment: .top, spacing: 10) {
+            RoundedRectangle(cornerRadius: 3)
+                .fill(session.projectColor)
+                .frame(width: 6)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    if editing {
+                        TextField("Nom du projet", text: $edit.text)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { commitRename() }
+                        Button("OK") { commitRename() }
+                        Button("Annuler") { edit.editingKey = nil }
+                    } else {
                         Text(session.projectName).font(.headline).lineLimit(1)
                         if !session.isLocal {
                             Text(session.host)
@@ -202,31 +276,44 @@ struct SessionRow: View {
                                 .padding(.horizontal, 5).padding(.vertical, 1)
                                 .background(.quaternary, in: Capsule())
                         }
+                        if hover.on {
+                            Button { startRename() } label: { Image(systemName: "pencil") }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("Renommer")
+                        }
                         Spacer()
                         Circle().fill(session.status.color).frame(width: 8, height: 8)
-                        TimelineView(.periodic(from: .now, by: 30)) { ctx in
-                            Text("\(session.status.label) · \(Self.elapsed(since: session.statusSince, now: ctx.date))")
-                                .font(.caption)
-                                .foregroundStyle(session.status.needsYou ? Color.primary : Color.secondary)
+                        if session.isFree {
+                            Text(session.status.label).font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            TimelineView(.periodic(from: .now, by: 30)) { ctx in
+                                Text("\(session.status.label) · \(Self.elapsed(since: session.statusSince, now: ctx.date))")
+                                    .font(.caption)
+                                    .foregroundStyle(session.status.needsYou ? Color.primary : Color.secondary)
+                            }
                         }
                     }
-                    if !session.reminder.isEmpty {
-                        Text(session.reminder)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                    }
+                }
+                if session.isFree {
+                    Text(attached == 0 ? "Aucune fenêtre : ⌃⌥A sur une fenêtre pour la rattacher"
+                         : (attached == 1 ? "1 fenêtre rattachée" : "\(attached) fenêtres rattachées"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else if !session.reminder.isEmpty {
+                    Text(session.reminder)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(hover.on ? Color.primary.opacity(0.07) : Color.clear)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .onHover { hover.on = $0 }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(hover.on && !editing ? Color.primary.opacity(0.07) : Color.clear)
+        .contentShape(Rectangle())
     }
 
     static func elapsed(since: Date, now: Date) -> String {
