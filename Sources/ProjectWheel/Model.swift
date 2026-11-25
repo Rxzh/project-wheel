@@ -44,10 +44,14 @@ struct SessionInfo: Identifiable {
     var backgroundTasks = 0     // still running when the last turn ended
     var tmuxPane: String = ""   // e.g. "%0"
     var pid: Int32 = 0          // local sessions only (from the registry)
+    var registered = false      // present in its machine's session registry
+    var registryHost = ""
+    var bridgeId = ""           // remote-control session id ("session_…"), if any
     var title: String = ""
 
     var projectName: String {
-        let name = (cwd as NSString).lastPathComponent
+        // Windows hosts report paths with backslashes.
+        let name = cwd.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
         return name.isEmpty ? "?" : name
     }
 
@@ -161,28 +165,41 @@ final class Store: ObservableObject {
         sessions[sid] = s
     }
 
-    // MARK: Local registry (~/.claude/sessions/<pid>.json)
+    // MARK: Session registry (~/.claude/sessions/<pid>.json, undocumented)
 
-    /// The registry tells us which local sessions are alive, their tmux pane and
-    /// pid, and a coarse busy/idle status for sessions that predate the hooks.
-    func refreshRegistry() {
+    /// The registry tells us which sessions exist, their launch directory, tmux
+    /// pane, remote-control id, and a coarse status that covers the transitions
+    /// hooks miss. Local entries are read from disk; remote ones arrive through
+    /// the SSH follower as a full snapshot per cycle.
+    func refreshLocalRegistry() {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude/sessions")
-        var alive = Set<String>()
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        for f in files where f.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: f),
+        let entries: [[String: Any]] = files.filter { $0.pathExtension == "json" }.compactMap {
+            guard let data = try? Data(contentsOf: $0),
                   let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let sid = o["sessionId"] as? String,
-                  let pid = o["pid"] as? Int,
-                  (o["kind"] as? String ?? "interactive") == "interactive",
-                  kill(Int32(pid), 0) == 0 else { continue }
+                  let pid = o["pid"] as? Int, kill(Int32(pid), 0) == 0 else { return nil }
+            return o
+        }
+        applyRegistry(entries, host: Self.localHost, isLocal: true)
+    }
+
+    static let localHost = "local"
+
+    func applyRegistry(_ entries: [[String: Any]], host: String, isLocal: Bool) {
+        var alive = Set<String>()
+        for o in entries {
+            guard let sid = o["sessionId"] as? String,
+                  (o["kind"] as? String ?? "interactive") == "interactive" else { continue }
             alive.insert(sid)
-            var s = sessions[sid] ?? SessionInfo(id: sid, host: Host.current().localizedName ?? "local", isLocal: true)
-            s.pid = Int32(pid)
+            var s = sessions[sid] ?? SessionInfo(id: sid, host: host, isLocal: isLocal)
+            s.registered = true
+            s.registryHost = host
+            if isLocal { s.pid = Int32((o["pid"] as? Int) ?? 0) }
             // The launch directory identifies the project; hook cwd can drift with `cd`.
             if let cwd = o["cwd"] as? String, !cwd.isEmpty { s.cwd = cwd }
             if let t = o["tmux"] as? String, let pane = t.split(separator: ".").last { s.tmuxPane = String(pane) }
             if s.title.isEmpty { s.title = (o["name"] as? String) ?? "" }
+            s.bridgeId = (o["bridgeSessionId"] as? String) ?? ""
             // Registry status: "busy", "idle", or "waiting" (blocked on a permission).
             let reg = o["status"] as? String
             let regStatus: SessionStatus = reg == "busy" ? .running : (reg == "waiting" ? .needsPermission : .waiting)
@@ -200,11 +217,30 @@ final class Store: ObservableObject {
         }
         let now = Date()
         for (sid, s) in sessions {
-            if s.isLocal && s.pid != 0 && !alive.contains(sid) {
-                sessions[sid] = nil  // process gone without a SessionEnd
-            } else if s.pid == 0 && now.timeIntervalSince(s.lastEventAt) > staleAfter {
+            if s.registered && s.registryHost == host && !alive.contains(sid) {
+                sessions[sid] = nil  // gone without a SessionEnd
+            } else if !s.registered && now.timeIntervalSince(s.lastEventAt) > staleAfter {
                 sessions[sid] = nil
             }
+        }
+    }
+
+    /// One line from a remote follower: a journal event, a registry entry, or
+    /// the marker that ends a registry snapshot.
+    private var pendingRegistry: [String: [[String: Any]]] = [:]
+
+    func applyRemote(line: String, host: String) {
+        if line == "PW_REG_END" {
+            applyRegistry(pendingRegistry[host] ?? [], host: host, isLocal: false)
+            pendingRegistry[host] = []
+            return
+        }
+        guard let data = line.data(using: .utf8),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if o["payload"] != nil {
+            apply(line: line, isLocal: false)
+        } else if o["sessionId"] != nil {
+            pendingRegistry[host, default: []].append(o)
         }
     }
 

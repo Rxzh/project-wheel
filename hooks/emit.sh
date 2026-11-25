@@ -12,7 +12,7 @@ mkdir -p "$dir" 2>/dev/null
 ts=$(date +%s)
 host=$(hostname -s 2>/dev/null || hostname)
 
-if command -v jq >/dev/null 2>&1; then
+if [ -z "$PW_NO_JQ" ] && command -v jq >/dev/null 2>&1; then
   jq -c --argjson ts "$ts" --arg host "$host" --arg tmux "${TMUX_PANE:-}" '
     def clip: if type == "string" then .[0:500] else null end;
     {ts: $ts, host: $host, tmux: $tmux,
@@ -23,12 +23,25 @@ if command -v jq >/dev/null 2>&1; then
                 bg: ((.background_tasks // []) | length)}
                | with_entries(select(.value != null)))}' >> "$journal" 2>/dev/null
 else
-  # No jq: keep identifiers only (extracted textually), never the content.
+  # No jq (e.g. Git Bash on Windows): extract the same fields textually.
+  # A JSON string body is a run of plain characters and complete escapes, so
+  # taking at most 500 of those units (2 x 250: BSD sed caps a repetition at 255) truncates without breaking an escape,
+  # and the extracted text can be re-emitted verbatim. A key can only match at
+  # the top level because quotes inside string values are escaped.
   raw=$(tr -d '\n\r')
-  field() { printf '%s' "$raw" | sed -n "s/.*\"$1\" *: *\"\([^\"]*\)\".*/\1/p"; }
-  printf '{"ts":%s,"host":"%s","tmux":"%s","payload":{"hook_event_name":"%s","session_id":"%s","cwd":"%s","notification_type":"%s","source":"%s"}}\n' \
-    "$ts" "$host" "${TMUX_PANE:-}" "$(field hook_event_name)" "$(field session_id)" \
-    "$(field cwd)" "$(field notification_type)" "$(field source)" >> "$journal" 2>/dev/null
+  unit='([^"\\]|\\u[0-9a-fA-F]{4}|\\[^u])'
+  field() { printf '%s' "$raw" | sed -nE "s/.*\"$1\" *: *\"(${unit}{0,250}${unit}{0,250}).*/\1/p"; }
+  event=$(field hook_event_name)
+  extra=""
+  case "$event" in
+    UserPromptSubmit) extra=",\"prompt\":\"$(field prompt)\"" ;;
+    Stop) extra=",\"last_assistant_message\":\"$(field last_assistant_message)\"" ;;
+    PermissionRequest) extra=",\"tool_name\":\"$(field tool_name)\"" ;;
+    Notification) extra=",\"notification_type\":\"$(field notification_type)\"" ;;
+    SessionStart) extra=",\"source\":\"$(field source)\"" ;;
+  esac
+  printf '{"ts":%s,"host":"%s","tmux":"%s","payload":{"hook_event_name":"%s","session_id":"%s","cwd":"%s"%s}}\n' \
+    "$ts" "$host" "${TMUX_PANE:-}" "$event" "$(field session_id)" "$(field cwd)" "$extra" >> "$journal" 2>/dev/null
 fi
 
 # Keep the journal bounded: past ~2 MB, keep the most recent 4000 lines.

@@ -48,6 +48,16 @@ final class RemoteJournal {
     private var buffer = LineBuffer()
     private var stopped = false
 
+    /// Runs in the remote login shell (bash, including Git Bash on Windows):
+    /// streams the journal, and every few seconds a snapshot of the session
+    /// registry, one JSON object per line, closed by PW_REG_END.
+    static let registrySnapshot =
+        "for f in ~/.claude/sessions/*.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done; echo PW_REG_END"
+    static let followCommand =
+        "echo PW_CONNECTED; mkdir -p ~/.project-wheel; touch ~/.project-wheel/events.jsonl; "
+        + "tail -n 5000 -F ~/.project-wheel/events.jsonl & "
+        + "while :; do \(registrySnapshot) || exit; sleep 4; done"
+
     init(host: String, onLine: @escaping (String) -> Void, onState: @escaping (Bool) -> Void) {
         self.host = host
         self.onLine = onLine
@@ -62,8 +72,7 @@ final class RemoteJournal {
             "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
             "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=2",
             host,
-            // The echo proves the link is up even when the journal is empty.
-            "echo PW_CONNECTED; mkdir -p ~/.project-wheel; touch ~/.project-wheel/events.jsonl; tail -n 5000 -F ~/.project-wheel/events.jsonl",
+            RemoteJournal.followCommand,
         ]
         let out = Pipe()
         p.standardOutput = out

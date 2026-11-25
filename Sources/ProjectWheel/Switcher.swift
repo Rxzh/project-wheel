@@ -12,7 +12,14 @@ enum Switcher {
                 focusLocal(s)
             } else {
                 // Remote sessions are driven from Claude Desktop (remote control).
-                open(["-a", "Claude"])
+                // Its claude://code/<session id> deep link targets one session;
+                // without a remote-control id we can only bring the app forward.
+                if s.bridgeId.isEmpty {
+                    open(["-a", "Claude"])
+                } else {
+                    open(["claude://code/" + s.bridgeId])
+                    open(["-a", "Claude"])
+                }
             }
         }
     }

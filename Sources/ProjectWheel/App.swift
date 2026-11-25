@@ -7,9 +7,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var remotes: [RemoteJournal] = []
     private var timer: Timer?
     private var wheel: WheelController?
+    private var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--dump") { dumpAndExit() }
+        // Followers of a previous instance that was killed outlive it: reap them,
+        // and make sure ours die with us on a signal too.
+        let reap = Process()
+        reap.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        reap.arguments = ["-f", "^/usr/bin/ssh .*echo PW_CONNECTED"]
+        try? reap.run()
+        reap.waitUntilExit()
+        for sig in [SIGTERM, SIGINT, SIGHUP] {
+            signal(sig, SIG_IGN)
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { [weak self] in
+                self?.remotes.forEach { $0.stop() }
+                exit(0)
+            }
+            src.resume()
+            signalSources.append(src)
+        }
         local = LocalJournal { [store] line in store.apply(line: line, isLocal: true) }
         tick()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
@@ -23,7 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             store.remoteConnected[host] = false
             let r = RemoteJournal(
                 host: host,
-                onLine: { [store] line in store.apply(line: line, isLocal: false) },
+                onLine: { [store] line in store.applyRemote(line: line, host: host) },
                 onState: { [store] up in store.remoteConnected[host] = up })
             remotes.append(r)
             r.start()
@@ -36,18 +54,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func tick() {
         local.poll()
-        store.refreshRegistry()
+        store.refreshLocalRegistry()
     }
 
     /// Debug aid: print the state derived from the local journal and registry.
     private func dumpAndExit() -> Never {
         let j = LocalJournal { [store] line in store.apply(line: line, isLocal: true) }
         j.poll()
-        store.refreshRegistry()
+        store.refreshLocalRegistry()
         for host in AppConfig.load().remotes {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-            p.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "tail -n 5000 ~/.project-wheel/events.jsonl"]
+            p.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "tail -n 5000 ~/.project-wheel/events.jsonl; " + RemoteJournal.registrySnapshot]
             let out = Pipe()
             p.standardOutput = out
             p.standardError = FileHandle.nullDevice
@@ -57,10 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             var buf = LineBuffer()
             let lines = buf.feed(data)
             print("remote \(host): exit \(p.terminationStatus), \(lines.count) events")
-            for line in lines { store.apply(line: line, isLocal: false) }
+            for line in lines { store.applyRemote(line: line, host: host) }
         }
         for s in store.sorted {
-            print("\(s.status.label)\t\(s.projectName)\t\(s.host)\tpane=\(s.tmuxPane)\tpid=\(s.pid)\t\(s.reminder.prefix(80))")
+            print("\(s.status.label)\t\(s.projectName)\t\(s.isLocal ? "local" : s.host)\tpane=\(s.tmuxPane)\tbridge=\(s.bridgeId.prefix(14))\t\(s.reminder.prefix(70))")
         }
         exit(0)
     }

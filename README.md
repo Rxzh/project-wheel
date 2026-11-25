@@ -11,10 +11,14 @@ local or on remote machines, and which ones are waiting for you.
 - **Local sessions.** The app tails the local journal and reads
   `~/.claude/sessions/*.json` (undocumented registry) for liveness, pid and tmux pane.
 - **Remote sessions.** For each host in `~/.project-wheel/config.json`, the app
-  keeps `ssh <host> tail -F ~/.project-wheel/events.jsonl` open and reconnects on
-  failure. Hosts are names from `~/.ssh/config`, so ProxyJump works.
+  keeps one SSH connection open that streams the remote journal and, every few
+  seconds, a snapshot of the remote session registry. It reconnects on failure.
+  Hosts are names from `~/.ssh/config`, so ProxyJump works. The remote login
+  shell must be bash (on Windows: OpenSSH Server with Git Bash as DefaultShell;
+  the hook works without `jq` there).
 - **Switching.** Clicking a local session selects its tmux pane and raises the
-  Terminal window showing it. Remote sessions open Claude Desktop.
+  Terminal window showing it. Remote sessions open Claude Desktop, on the
+  session itself when it has a remote-control id.
 
 ## Setup
 
