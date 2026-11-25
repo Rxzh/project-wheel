@@ -2,24 +2,63 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 
-/// System-wide hotkey with press and release callbacks (Carbon: needs no permission).
+/// System-wide hotkeys with press and release callbacks (Carbon: needs no permission).
+/// One application-wide handler dispatches on EventHotKeyID.id.
 final class HotKey {
-    static var onDown: (() -> Void)?
-    static var onUp: (() -> Void)?
+    private static var callbacks: [UInt32: (down: () -> Void, up: () -> Void)] = [:]
+    private static var nextID: UInt32 = 1
+    private static var installed = false
     private var ref: EventHotKeyRef?
 
-    init(keyCode: Int, modifiers: Int) {
+    init(keyCode: Int, modifiers: Int, onDown: @escaping () -> Void, onUp: @escaping () -> Void) {
+        Self.installHandler()
+        let n = Self.nextID
+        Self.nextID += 1
+        Self.callbacks[n] = (onDown, onUp)
+        let id = EventHotKeyID(signature: 0x5057_484C, id: n)
+        RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
+    }
+
+    /// Carbon hotkeys take a physical key position: find the key that types `char`
+    /// on the current layout (on AZERTY, "a" sits where QWERTY has Q).
+    static func keyCode(for char: Character, fallback: Int) -> Int {
+        guard let src = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let raw = TISGetInputSourceProperty(src, kTISPropertyUnicodeKeyLayoutData) else { return fallback }
+        let data = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue() as Data
+        return data.withUnsafeBytes { buf -> Int in
+            guard let layout = buf.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return fallback }
+            for code in 0..<128 {
+                var dead: UInt32 = 0
+                var chars = [UniChar](repeating: 0, count: 4)
+                var len = 0
+                let err = UCKeyTranslate(layout, UInt16(code), UInt16(kUCKeyActionDown), 0, UInt32(LMGetKbdType()),
+                                         OptionBits(kUCKeyTranslateNoDeadKeysBit), &dead, 4, &len, &chars)
+                if err == noErr, len == 1, String(utf16CodeUnits: chars, count: 1) == String(char) { return code }
+            }
+            return fallback
+        }
+    }
+
+    /// Installed once: a handler per hotkey would fire every callback for each key.
+    private static func installHandler() {
+        guard !installed else { return }
+        installed = true
         var specs = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
         ]
         InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+            var hk = EventHotKeyID()
+            let err = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                        nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
+            guard err == noErr else { return OSStatus(eventNotHandledErr) }
             let pressed = GetEventKind(event) == UInt32(kEventHotKeyPressed)
-            DispatchQueue.main.async { pressed ? HotKey.onDown?() : HotKey.onUp?() }
+            DispatchQueue.main.async {
+                guard let cb = HotKey.callbacks[hk.id] else { return }
+                pressed ? cb.down() : cb.up()
+            }
             return noErr
         }, 2, &specs, nil, nil)
-        let id = EventHotKeyID(signature: 0x5057_484C, id: 1)
-        RegisterEventHotKey(UInt32(keyCode), UInt32(modifiers), id, GetApplicationEventTarget(), 0, &ref)
     }
 }
 
@@ -27,6 +66,8 @@ final class WheelState: ObservableObject {
     @Published var sessions: [SessionInfo] = []
     @Published var selected: Int?
     @Published var center: CGPoint = .zero  // in view coordinates (y down)
+    /// Set in attach mode: the window that choosing a sector attaches.
+    @Published var attaching: CapturedWindow?
 }
 
 /// Shows the wheel around the cursor while the hotkey is held; releasing over a
@@ -40,21 +81,34 @@ final class WheelController {
     private let state = WheelState()
     private var panel: NSPanel?
     private var tracker: Timer?
-    private var hotKey: HotKey?
+    private var hotKeys: [HotKey] = []
     private var origin: CGPoint = .zero  // wheel centre in screen coordinates (y up)
     private var shownAt = Date()
     private var sticky = false
 
     init(store: Store) {
         self.store = store
-        HotKey.onDown = { [weak self] in self?.keyDown() }
-        HotKey.onUp = { [weak self] in self?.keyUp() }
-        hotKey = HotKey(keyCode: kVK_Space, modifiers: controlKey | optionKey)
+        // ⌃⌥Space switches; ⌃⌥A attaches the frontmost window to the chosen project.
+        // Both share the hold / aim / release state machine.
+        hotKeys.append(HotKey(keyCode: kVK_Space, modifiers: controlKey | optionKey,
+                              onDown: { [weak self] in self?.keyDown() },
+                              onUp: { [weak self] in self?.keyUp() }))
+        hotKeys.append(HotKey(keyCode: HotKey.keyCode(for: "a", fallback: kVK_ANSI_A), modifiers: controlKey | optionKey,
+                              onDown: { [weak self] in self?.attachKeyDown() },
+                              onUp: { [weak self] in self?.keyUp() }))
     }
 
     private func keyDown() {
         if panel != nil { hide(); return }
         show(sticky: false)
+    }
+
+    private func attachKeyDown() {
+        if panel != nil { hide(); return }
+        // Capture first: whatever is frontmost now is the window the user means.
+        guard WindowManager.shared.ensureTrusted() else { return }  // the system dialog explains
+        guard !store.sessions.isEmpty, let w = WindowManager.shared.frontmostWindow() else { NSSound.beep(); return }
+        show(sticky: false, attaching: w)
     }
 
     private func keyUp() {
@@ -66,7 +120,7 @@ final class WheelController {
         }
     }
 
-    func show(sticky: Bool) {
+    func show(sticky: Bool, attaching: CapturedWindow? = nil) {
         let mouse = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main else { return }
         let f = screen.frame
@@ -74,6 +128,7 @@ final class WheelController {
         origin = CGPoint(x: min(max(mouse.x, f.minX + r), f.maxX - r), y: min(max(mouse.y, f.minY + r), f.maxY - r))
         state.sessions = Array(store.sorted.prefix(Self.maxSectors))
         state.selected = nil
+        state.attaching = attaching
         state.center = CGPoint(x: origin.x - f.minX, y: f.maxY - origin.y)
         self.sticky = sticky
         shownAt = Date()
@@ -106,7 +161,16 @@ final class WheelController {
     }
 
     private func commit() {
-        if let i = state.selected, state.sessions.indices.contains(i) { Switcher.focus(state.sessions[i]) }
+        if let i = state.selected, state.sessions.indices.contains(i) {
+            let s = state.sessions[i]
+            if let w = state.attaching {
+                // Choosing the project the window already belongs to detaches it.
+                let wm = WindowManager.shared
+                if wm.project(of: w) == s.projectKey { wm.detach(w) } else { wm.attach(w, to: s.projectKey) }
+            } else {
+                Switcher.focus(s)
+            }
+        }
         hide()
     }
 
@@ -120,6 +184,7 @@ final class WheelController {
 
 struct WheelView: View {
     @ObservedObject var state: WheelState
+    @ObservedObject var windows = WindowManager.shared
     let onClick: () -> Void
 
     var body: some View {
@@ -134,8 +199,11 @@ struct WheelView: View {
                 ForEach(Array(state.sessions.enumerated()), id: \.element.id) { i, s in
                     SectorView(session: s, index: i, count: n, selected: state.selected == i)
                 }
-                if let i = state.selected, state.sessions.indices.contains(i) {
-                    ReminderCard(session: state.sessions[i])
+                let sel = state.selected.flatMap { state.sessions.indices.contains($0) ? state.sessions[$0] : nil }
+                if let w = state.attaching {
+                    AttachCard(window: w, current: windows.project(of: w), target: sel)
+                } else if let s = sel {
+                    ReminderCard(session: s, attached: windows.count(for: s.projectKey))
                 } else if n > 0 {
                     let waiting = state.sessions.filter { $0.status.needsYou }.count
                     VStack(spacing: 4) {
@@ -213,6 +281,7 @@ struct SectorView: View {
 /// Centre of the wheel: what this project was doing and what it wants from you.
 struct ReminderCard: View {
     let session: SessionInfo
+    let attached: Int
 
     var body: some View {
         VStack(spacing: 6) {
@@ -230,11 +299,59 @@ struct ReminderCard: View {
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                    .lineLimit(6)
+                    .lineLimit(attached > 0 ? 5 : 6)
+            }
+            if attached > 0 {
+                Label(attached == 1 ? "1 fenêtre rattachée" : "\(attached) fenêtres rattachées", systemImage: "macwindow.on.rectangle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(18)
         .frame(width: 2 * WheelController.innerRadius - 8, height: 2 * WheelController.innerRadius - 8)
         .background(.ultraThinMaterial, in: Circle())
+    }
+}
+
+/// Centre of the wheel in attach mode: which window is being attached, where it
+/// is now, and what releasing over the selected sector will do.
+struct AttachCard: View {
+    let window: CapturedWindow
+    let current: String?  // project key the window belongs to, if any
+    let target: SessionInfo?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "macwindow.badge.plus").font(.system(size: 22))
+            Text(window.app).font(.system(size: 16, weight: .bold)).lineLimit(1)
+            if !window.title.isEmpty {
+                Text(window.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+            Text(current.map { "Rattachée à " + Self.name(ofKey: $0) } ?? "Rattachée à aucun projet")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Group {
+                if let t = target {
+                    Text(t.projectKey == current ? "Détacher de \(t.projectName)" : "→ \(t.projectName)")
+                } else {
+                    Text("Choisis un projet")
+                }
+            }
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+        }
+        .padding(18)
+        .frame(width: 2 * WheelController.innerRadius - 8, height: 2 * WheelController.innerRadius - 8)
+        .background(.ultraThinMaterial, in: Circle())
+    }
+
+    /// "local:/Users/x/proj" -> "proj" (same rule as SessionInfo.projectName).
+    static func name(ofKey key: String) -> String {
+        let path = key.drop(while: { $0 != ":" }).dropFirst()
+        return path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? "?"
     }
 }

@@ -6,8 +6,17 @@ enum Switcher {
     static let tmuxPath: String? = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
         .first { FileManager.default.isExecutableFile(atPath: $0) }
 
+    static let claudeBundleID = "com.anthropic.claudefordesktop"
+
+    /// Serial: two switches in a row must run one after the other, or the
+    /// first one's hide/activate steps could land on top of the second.
+    private static let queue = DispatchQueue(label: "ProjectWheel.switch", qos: .userInitiated)
+
     static func focus(_ s: SessionInfo) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        queue.async {
+            // Hide the rest and raise the project's windows first, so the
+            // session's own window, brought forward below, ends on top.
+            WindowManager.shared.focus(project: s.projectKey, keepApps: keepApps(s))
             if s.isLocal {
                 focusLocal(s)
             } else {
@@ -22,6 +31,40 @@ enum Switcher {
                 }
             }
         }
+    }
+
+    /// Apps focus mode must not hide: the one hosting the session. Terminal is
+    /// always kept (focusLocal may open it); the real host is found by walking up
+    /// the process tree from the session, or from its tmux client, to the first
+    /// regular app (iTerm2, Ghostty, VS Code…).
+    private static func keepApps(_ s: SessionInfo) -> Set<String> {
+        guard s.isLocal else { return [claudeBundleID] }
+        var keep: Set<String> = ["com.apple.Terminal"]
+        var starts: [pid_t] = s.pid != 0 ? [s.pid] : []
+        if !s.tmuxPane.isEmpty, let tmux = tmuxPath {
+            // A tmux pane's parent is the tmux server, not the terminal: use the clients.
+            let name = run(tmux, ["display-message", "-p", "-t", s.tmuxPane, "#{session_name}"])
+            if !name.isEmpty {
+                starts += run(tmux, ["list-clients", "-t", name, "-F", "#{client_pid}"])
+                    .split(separator: "\n").compactMap { pid_t($0) }
+            }
+        }
+        for start in starts {
+            if let id = hostApp(of: start) { keep.insert(id) }
+        }
+        return keep
+    }
+
+    private static func hostApp(of start: pid_t) -> String? {
+        var pid = start
+        for _ in 0..<32 where pid > 1 {
+            if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular {
+                return app.bundleIdentifier
+            }
+            guard let parent = pid_t(run("/bin/ps", ["-o", "ppid=", "-p", String(pid)])) else { return nil }
+            pid = parent
+        }
+        return nil
     }
 
     private static func focusLocal(_ s: SessionInfo) {

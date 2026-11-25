@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func tick() {
         local.poll()
         store.refreshLocalRegistry()
+        WindowManager.shared.refreshTrust()
     }
 
     /// Debug aid: print the state derived from the local journal and registry.
@@ -80,6 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         for s in store.sorted {
             print("\(s.status.label)\t\(s.projectName)\t\(s.isLocal ? "local" : s.host)\tpane=\(s.tmuxPane)\tbridge=\(s.bridgeId.prefix(14))\t\(s.reminder.prefix(70))")
+        }
+        let wm = WindowManager.shared
+        print("accessibility=\(wm.trusted) focusMode=\(wm.focusMode) attached=\(wm.windows.count)")
+        for w in wm.windows {
+            print("window\t\(w.project)\t\(w.app)\tpid=\(w.pid)\tid=\(w.windowID)\t\(w.title.prefix(60))")
         }
         exit(0)
     }
@@ -111,9 +117,29 @@ struct MenuBarLabel: View {
 
 struct SessionList: View {
     @ObservedObject var store: Store
+    @ObservedObject var windows = WindowManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if !windows.trusted {
+                // Attaching windows needs it; switching works without.
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.shield").foregroundStyle(.orange)
+                    Text("Autorise l'accessibilité pour rattacher des fenêtres (⌃⌥A) et le mode focus.")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Réglages…") {
+                        windows.ensureTrusted()
+                        windows.openAccessibilitySettings()
+                    }
+                    .font(.caption)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.orange.opacity(0.12))
+                Divider()
+            }
             if store.sorted.isEmpty {
                 Text("Aucune session Claude Code active")
                     .foregroundStyle(.secondary)
@@ -132,6 +158,11 @@ struct SessionList: View {
                         .help(up ? "Connecté" : "Injoignable, nouvelle tentative en cours")
                 }
                 Spacer()
+                Toggle("Mode focus", isOn: $windows.focusMode)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.caption)
+                    .help("En changeant de projet, masque les apps sans fenêtre rattachée au projet")
                 Button("Quitter") { NSApp.terminate(nil) }
                     .buttonStyle(.plain)
                     .font(.caption)

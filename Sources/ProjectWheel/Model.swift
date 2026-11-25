@@ -55,6 +55,10 @@ struct SessionInfo: Identifiable {
         return name.isEmpty ? "?" : name
     }
 
+    /// What attached windows hang on. Not keyed on the host name: hook events
+    /// and the registry spell the same host differently.
+    var projectKey: String { (isLocal ? "local:" : "remote:") + cwd }
+
     /// Stable per-project hue so a project always has the same colour.
     var projectColor: Color {
         var h: UInt32 = 2166136261

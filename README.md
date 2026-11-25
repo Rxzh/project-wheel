@@ -19,6 +19,19 @@ local or on remote machines, and which ones are waiting for you.
 - **Switching.** Clicking a local session selects its tmux pane and raises the
   Terminal window showing it. Remote sessions open Claude Desktop, on the
   session itself when it has a remote-control id.
+- **Attached windows.** ⌃⌥A captures the frontmost window and opens the wheel in
+  attach mode: the centre names the window (app, title, current project) and
+  choosing a sector attaches it to that project (choosing its current project
+  detaches it). A window belongs to one project at most. Attachments live in
+  `~/.project-wheel/windows.json`, keyed on `local:` or `remote:` plus the
+  session's directory, and disappear once the window or its app is gone.
+- **Focus mode.** On a switch (wheel or menu), the app hides every app that has
+  no window attached to the project (except Terminal for a local session, Claude
+  for a remote one), raises the attached windows, then brings the session
+  forward so it ends on top. Toggle it with « Mode focus » in the menu (on by
+  default). This needs the Accessibility permission, asked for on the first ⌃⌥A;
+  without it switching works as before. The build is ad-hoc signed, so a rebuild
+  may require granting the permission again.
 
 ## Setup
 
@@ -36,5 +49,5 @@ Builds with the Command Line Tools alone (no Xcode). Debug the derived state wit
 1. ~~Hooks and journal, local and remote~~
 2. ~~Menu-bar list with status~~
 3. ~~Radial wheel on ⌃⌥Space (hold, aim, release; quick tap keeps it open), reminder card in the centre~~
-4. Focus mode: raise all of a project's windows, hide the rest
+4. ~~Focus mode: windows attached by hand (⌃⌥A), raised on a switch, the rest hidden~~
 5. Saved window layouts per display configuration
