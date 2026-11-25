@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
 
         wheel = WheelController(store: store)
+        wheelLog("start: accessibility \(AXIsProcessTrusted()), focus mode \(WindowManager.shared.focusMode), \(WindowManager.shared.windows.count) attached")
         if ProcessInfo.processInfo.environment["PW_SHOW_WHEEL"] != nil {  // debug aid
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.wheel?.show(sticky: true) }
         }
@@ -238,6 +239,11 @@ struct SessionRow: View {
             Button("Renommer…") { startRename() }
             if !session.isFree && !session.customName.isEmpty {
                 Button("Rétablir le nom du dossier") { store.rename(session, to: "") }
+            }
+            if attached > 0 {
+                Button(attached == 1 ? "Détacher sa fenêtre" : "Détacher ses \(attached) fenêtres") {
+                    WindowManager.shared.detachAll(project: session.projectKey)
+                }
             }
             if session.isFree {
                 Button("Supprimer le projet") { store.deleteFreeProject(session) }

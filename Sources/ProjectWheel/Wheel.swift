@@ -164,9 +164,10 @@ final class WheelController {
         if let i = state.selected, state.sessions.indices.contains(i) {
             let s = state.sessions[i]
             if let w = state.attaching {
-                // Choosing the project the window already belongs to detaches it.
+                // Attaching again is a no-op, never a detach: a retry after a
+                // doubt must not silently undo the attachment.
                 let wm = WindowManager.shared
-                if wm.project(of: w) == s.projectKey { wm.detach(w) } else { wm.attach(w, to: s.projectKey) }
+                wm.attach(w, to: s.projectKey)
             } else {
                 Switcher.focus(s)
             }
@@ -337,7 +338,7 @@ struct AttachCard: View {
                 .foregroundStyle(.secondary)
             Group {
                 if let t = target {
-                    Text(t.projectKey == current ? "Détacher de \(t.projectName)" : "→ \(t.projectName)")
+                    Text(t.projectKey == current ? "Déjà rattachée à \(t.projectName)" : "→ \(t.projectName)")
                 } else {
                     Text("Choisis un projet")
                 }

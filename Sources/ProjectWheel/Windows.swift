@@ -6,6 +6,27 @@ import ApplicationServices
 @_silgen_name("_AXUIElementGetWindow")
 private func _AXUIElementGetWindow(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError
 
+// Private window-server calls (the ones window switchers rely on): bring one
+// window of a process forward by id, even from another Space, where the
+// accessibility window list does not show it.
+@_silgen_name("GetProcessForPID")
+private func GetProcessForPID(_ pid: pid_t, _ psn: UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+@_silgen_name("_SLPSSetFrontProcessWithOptions")
+private func _SLPSSetFrontProcessWithOptions(_ psn: UnsafeMutablePointer<ProcessSerialNumber>, _ wid: CGWindowID, _ mode: UInt32) -> CGError
+
+/// Appends to ~/.project-wheel/app.log: what was attached, raised or dropped.
+func wheelLog(_ message: String) {
+    let line = ISO8601DateFormatter().string(from: Date()) + " " + message + "\n"
+    let url = AppConfig.dir.appendingPathComponent("app.log")
+    if let h = try? FileHandle(forWritingTo: url) {
+        defer { try? h.close() }
+        if ((try? h.seekToEnd()) ?? 0) > 1_000_000 { try? h.truncate(atOffset: 0) }
+        h.write(line.data(using: .utf8)!)
+    } else {
+        try? line.data(using: .utf8)!.write(to: url)
+    }
+}
+
 /// A window the user attached to a project by hand.
 struct AttachedWindow: Codable, Equatable {
     var pid: pid_t
@@ -104,6 +125,7 @@ final class WindowManager: ObservableObject {
         var list = windows.filter { !($0.pid == w.pid && $0.windowID == w.windowID) }
         list.append(AttachedWindow(pid: w.pid, windowID: w.windowID, app: w.app, title: w.title, project: project))
         save(list)
+        wheelLog("attach \(w.app) #\(w.windowID) pid \(w.pid) -> \(project)")
     }
 
     func detach(_ w: CapturedWindow) {
@@ -142,7 +164,9 @@ final class WindowManager: ObservableObject {
         let gone = snapshot.filter { w in
             kill(w.pid, 0) != 0 || owners.map { $0[w.windowID] != w.pid } ?? false
         }
+        wheelLog("focus \(project): \(snapshot.filter { $0.project == project }.count) attached, \(gone.count) gone, hideOthers \(hideOthers)")
         if !gone.isEmpty {
+            wheelLog("dropping " + gone.map { "\($0.app) #\($0.windowID)" }.joined(separator: ", "))
             DispatchQueue.main.async {
                 self.save(self.windows.filter { w in !gone.contains(w) })
             }
@@ -166,17 +190,24 @@ final class WindowManager: ObservableObject {
             AXUIElementSetMessagingTimeout(axApp, 1)
             let axWindows: [AXUIElement] = Self.attribute(axApp, kAXWindowsAttribute) ?? []
             let wanted = Set(mine.filter { $0.pid == pid }.map(\.windowID))
-            var raised = false
+            var viaAX = Set<CGWindowID>()
             for win in axWindows {
                 var id: CGWindowID = 0
                 guard _AXUIElementGetWindow(win, &id) == .success, wanted.contains(id) else { continue }
                 AXUIElementSetAttributeValue(win, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
                 AXUIElementPerformAction(win, kAXRaiseAction as CFString)
-                raised = true
+                viaAX.insert(id)
             }
-            // Raise alone orders the window within its app; bringing the app
-            // forward puts it above the others. The session comes last anyway.
-            if raised { AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue) }
+            // AX raise orders a window within its app, and only sees windows of
+            // the current Space. The window-server call brings each window above
+            // the other apps, from any Space. The session comes last anyway.
+            var psn = ProcessSerialNumber()
+            let havePSN = GetProcessForPID(pid, &psn) == noErr
+            for id in wanted {
+                let r = havePSN ? _SLPSSetFrontProcessWithOptions(&psn, id, 0x200) : .failure
+                wheelLog("raise #\(id) pid \(pid): ax \(viaAX.contains(id)), front \(r == .success)")
+            }
+            if !havePSN { AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue) }
         }
     }
 
