@@ -46,15 +46,29 @@ local or on remote machines, and which ones are waiting for you.
   still running shows "Tourne en fond", not "À toi".
 - **Diagnostics.** `~/.project-wheel/app.log` records attachments, raises and layouts.
 
-## Setup
+## Install
+
+Requires macOS 14 or later (Apple Silicon or Intel).
+
+1. Download `ProjectWheel-<version>.zip` from the
+   [latest release](https://github.com/Rxzh/project-wheel/releases/latest) and unzip it.
+2. Move `ProjectWheel.app` to `/Applications`. The app is not notarized, so clear
+   the quarantine flag before the first launch:
+   `xattr -dr com.apple.quarantine /Applications/ProjectWheel.app`
+3. Install the hooks on each machine running Claude Code, from the unzipped folder:
+   `python3 scripts/install-hooks.py`
+4. Optionally list remote hosts (see below), then open the app.
+
+## Build from source
 
 ```sh
 python3 scripts/install-hooks.py     # on each machine (add --uninstall to remove)
-echo '{"remotes":["labdesktop"]}' > ~/.project-wheel/config.json
+echo '{"remotes":["myserver"]}' > ~/.project-wheel/config.json
 ./scripts/build-app.sh && open build/ProjectWheel.app
 ```
 
-Builds with the Command Line Tools alone (no Xcode). Debug the derived state with
+Builds with the Command Line Tools alone (no Xcode); `--universal` builds for
+both Apple Silicon and Intel. Debug the derived state with
 `build/ProjectWheel.app/Contents/MacOS/ProjectWheel --dump`.
 
 ## Roadmap
@@ -64,3 +78,7 @@ Builds with the Command Line Tools alone (no Xcode). Debug the derived state wit
 3. ~~Radial wheel on ⌃⌥Space (hold, aim, release; quick tap keeps it open), reminder card in the centre~~
 4. ~~Focus mode: windows attached by hand (⌃⌥A), raised on a switch, the rest hidden~~
 5. ~~Saved window layouts per display configuration~~
+
+## License
+
+MIT, see [LICENSE](LICENSE).

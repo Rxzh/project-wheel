@@ -1,13 +1,24 @@
 #!/bin/sh
 # Build ProjectWheel.app (menu-bar app, no Dock icon) into ./build.
+# --universal builds arm64 and x86_64 and merges them (for releases).
 set -e
 cd "$(dirname "$0")/.."
-# The default (swiftbuild) backend needs a full Xcode; native works with the CLT.
-swift build -c release --build-system native
 APP=build/ProjectWheel.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp .build/release/ProjectWheel "$APP/Contents/MacOS/ProjectWheel"
+# The default (swiftbuild) backend needs a full Xcode; native works with the CLT.
+# It builds one architecture at a time, hence one build per triple and lipo.
+if [ "$1" = "--universal" ]; then
+  for arch in arm64 x86_64; do
+    swift build -c release --build-system native --triple "$arch-apple-macosx14.0"
+  done
+  lipo -create -output "$APP/Contents/MacOS/ProjectWheel" \
+    .build/arm64-apple-macosx/release/ProjectWheel \
+    .build/x86_64-apple-macosx/release/ProjectWheel
+else
+  swift build -c release --build-system native
+  cp .build/release/ProjectWheel "$APP/Contents/MacOS/ProjectWheel"
+fi
 cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
