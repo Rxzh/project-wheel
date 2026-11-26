@@ -30,8 +30,10 @@ local or on remote machines, and which ones are waiting for you.
   for a remote one), raises the attached windows, then brings the session
   forward so it ends on top. Toggle it with « Mode focus » in the menu (on by
   default). This needs the Accessibility permission, asked for on the first ⌃⌥A;
-  without it switching works as before. The build is ad-hoc signed, so a rebuild
-  may require granting the permission again.
+  without it switching works as before. Release builds keep the same signature, so
+  the permission survives updates; a local build is ad-hoc signed unless a
+  "ProjectWheel Local Signing" certificate is in the keychain, and then each
+  rebuild may require granting the permission again.
 
 - **Free projects and names.** "Nouveau projet" in the menu creates a project
   with no session behind it: only attached windows. Any project can be renamed
