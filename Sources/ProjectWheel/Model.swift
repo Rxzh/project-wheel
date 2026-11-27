@@ -191,12 +191,17 @@ final class Store: ObservableObject {
         guard let data = line.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let payload = obj["payload"] as? [String: Any],
-              let sid = payload["session_id"] as? String,
+              var sid = payload["session_id"] as? String,
               let event = payload["hook_event_name"] as? String else { return }
         let when = Date(timeIntervalSince1970: (obj["ts"] as? Double) ?? Date().timeIntervalSince1970)
         let host = (obj["host"] as? String) ?? "?"
 
-        if event == "SessionEnd" {
+        // A conversation parked in a background job keeps going there: its
+        // events belong to the interactive session that parked it.
+        if let parent = parkedIn[sid] {
+            if event == "SessionEnd" { return }  // the job ends, the session stays
+            sid = parent
+        } else if event == "SessionEnd" {
             sessions[sid] = nil
             return
         }
@@ -273,16 +278,33 @@ final class Store: ObservableObject {
     /// (background jobs, spares), per registry host.
     private var ignoredByHost: [String: Set<String>] = [:]
     private var ignoredIds: Set<String> { ignoredByHost.values.reduce(into: Set()) { $0.formUnion($1) } }
+    /// Background job session id -> the interactive session that parked its
+    /// conversation in it (registry `parkedJobId` matches the job's `jobId`).
+    private var parkedByHost: [String: [String: String]] = [:]
+    private var parkedIn: [String: String] { parkedByHost.values.reduce(into: [:]) { $0.merge($1) { a, _ in a } } }
 
     func applyRegistry(_ entries: [[String: Any]], host: String, isLocal: Bool) {
         var alive = Set<String>()
         var ignored = Set<String>()
+        // Background jobs by job id, to follow conversations parked in them.
+        var jobs: [String: [String: Any]] = [:]
+        for o in entries where (o["kind"] as? String ?? "interactive") != "interactive" {
+            if let job = o["jobId"] as? String { jobs[job] = o }
+        }
+        var parked: [String: String] = [:]
         for o in entries {
             guard let sid = o["sessionId"] as? String else { continue }
             guard (o["kind"] as? String ?? "interactive") == "interactive" else {
                 ignored.insert(sid)
-                sessions[sid] = nil  // may have been created from its hook events
                 continue
+            }
+            // The job carries the conversation from now on, so its status is the session's.
+            var o = o
+            if let job = o["parkedJobId"] as? String, let j = jobs[job], let jsid = j["sessionId"] as? String {
+                parked[jsid] = sid
+                ignored.remove(jsid)
+                o["status"] = j["status"]
+                o["statusUpdatedAt"] = j["statusUpdatedAt"]
             }
             alive.insert(sid)
             var s = sessions[sid] ?? SessionInfo(id: sid, host: host, isLocal: isLocal)
@@ -314,9 +336,26 @@ final class Store: ObservableObject {
                 s.status = regStatus
                 s.statusSince = since
             }
+            // Events the job sent before we knew it was parked (journal replay).
+            if let jsid = parked.first(where: { $0.value == sid })?.key, let j = sessions[jsid] {
+                if j.lastEventAt > s.lastEventAt {
+                    s.lastEventAt = j.lastEventAt
+                    s.hasHookEvents = true
+                    s.status = j.status
+                    s.statusSince = j.statusSince
+                    if !j.lastPrompt.isEmpty { s.lastPrompt = j.lastPrompt }
+                    if !j.lastMessage.isEmpty { s.lastMessage = j.lastMessage }
+                    s.permissionTool = j.permissionTool
+                    s.sawPermissionRequest = s.sawPermissionRequest || j.sawPermissionRequest
+                    s.backgroundTasks = j.backgroundTasks
+                }
+                sessions[jsid] = nil
+            }
             sessions[sid] = s
         }
+        for sid in ignored { sessions[sid] = nil }  // may have been created from its hook events
         ignoredByHost[host] = ignored
+        parkedByHost[host] = parked
         let now = Date()
         for (sid, s) in sessions {
             if s.registered && s.registryHost == host && !alive.contains(sid) {
