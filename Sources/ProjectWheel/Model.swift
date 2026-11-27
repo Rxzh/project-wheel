@@ -200,6 +200,8 @@ final class Store: ObservableObject {
             sessions[sid] = nil
             return
         }
+        // Background jobs and spare sessions fire hooks too, but are not projects.
+        if ignoredIds.contains(sid) { return }
         var s = sessions[sid] ?? SessionInfo(id: sid, host: host, isLocal: isLocal)
         guard when >= s.lastEventAt else { return }  // replayed or out-of-order line
         s.lastEventAt = when
@@ -267,11 +269,21 @@ final class Store: ObservableObject {
 
     static let localHost = "local"
 
+    /// Session ids the registry lists with a kind other than "interactive"
+    /// (background jobs, spares), per registry host.
+    private var ignoredByHost: [String: Set<String>] = [:]
+    private var ignoredIds: Set<String> { ignoredByHost.values.reduce(into: Set()) { $0.formUnion($1) } }
+
     func applyRegistry(_ entries: [[String: Any]], host: String, isLocal: Bool) {
         var alive = Set<String>()
+        var ignored = Set<String>()
         for o in entries {
-            guard let sid = o["sessionId"] as? String,
-                  (o["kind"] as? String ?? "interactive") == "interactive" else { continue }
+            guard let sid = o["sessionId"] as? String else { continue }
+            guard (o["kind"] as? String ?? "interactive") == "interactive" else {
+                ignored.insert(sid)
+                sessions[sid] = nil  // may have been created from its hook events
+                continue
+            }
             alive.insert(sid)
             var s = sessions[sid] ?? SessionInfo(id: sid, host: host, isLocal: isLocal)
             s.registered = true
@@ -304,6 +316,7 @@ final class Store: ObservableObject {
             }
             sessions[sid] = s
         }
+        ignoredByHost[host] = ignored
         let now = Date()
         for (sid, s) in sessions {
             if s.registered && s.registryHost == host && !alive.contains(sid) {
